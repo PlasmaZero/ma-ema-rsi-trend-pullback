@@ -1,0 +1,158 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © PlasmaZero
+
+//@version=6
+indicator("MA/EMA + RSI Trend & Pullback", overlay=true, max_labels_count=500)
+
+// INPUTS //
+src      = input.source(close, "Source")
+maType   = input.string("EMA", "MA Type", options = ["EMA", "SMA"])
+fastLen  = input.int(21, "Fast MA Length", minval = 1)
+slowLen  = input.int(50, "Slow MA Length", minval = 1)
+rsiLen   = input.int(14, "RSI Length", minval = 1)
+rsiOB    = input.float(65.0, "RSI Overbought Level", minval = 50, maxval = 100)
+rsiOS    = input.float(35.0, "RSI Oversold Level", minval = 0, maxval = 50)
+rsiMid   = input.float(50.0, "RSI Midpoint", minval = 30, maxval = 70)
+
+// Entry Mode Selection //
+// Lets user pick how entries are generated:
+// Only RSI crossovers, RSI + MA pullbacks, or a combination of several signal types.
+// Default: "Multiple Signals".
+entryMode = input.string("Multiple Signals", "Entry Mode", 
+     options = ["RSI Crossover Only", "RSI Zone + MA", "Multiple Signals"])
+
+// Moving Averages //
+ma(src, length) =>
+    maType == "EMA" ? ta.ema(src, length) : ta.sma(src, length)
+
+fastMA = ma(src, fastLen)
+slowMA = ma(src, slowLen)
+
+// Trend Definition //
+upTrend   = fastMA > slowMA //true when fast MA is above slow MA.
+downTrend = fastMA < slowMA //true when fast MA is below slow MA.
+trendJustChanged = (upTrend and not upTrend[1]) or (downTrend and not downTrend[1]) //Checks if we just flipped trend on the given bar 
+// meaning did we enter an uptrend/downtrend where trend saw a flip from previous bar.
+
+// RSI //
+rsi = ta.rsi(src, rsiLen)
+rsiInOversold  = rsi < rsiOS //true when RSI is below oversold level
+rsiInOverbought = rsi > rsiOB //true when RSI is above overbought level.
+rsiRising = rsi > rsi[1]//RSI is higher than previous bar indicates upward momentum.
+rsiFalling = rsi < rsi[1]//RSI is lower than previous bar indicates downward momentum.
+
+// Entry Signals //
+// Type 1: RSI Crossover (the most strict condition (least number of signals)
+longCross  = ta.crossover(rsi, rsiOS)//RSI crosses up through oversold level (coming out of oversold).
+shortCross = ta.crossunder(rsi, rsiOB)//RSI crosses down through overbought level (coming down from overbought)
+
+// Type 2: RSI in zone + price pullback to MA
+pricePullbackLong  = upTrend and close < fastMA and close > slowMA and rsi < rsiMid //Only in upTrend, price pulled back below fastMA, but still above slowMA, RSI below mid
+pricePullbackShort = downTrend and close > fastMA and close < slowMA and rsi > rsiMid //Only in downTrend, price pulled back above fastMA, but still below slowMA, RSI above mid
+
+// Type 3: New trend + favorable RSI
+newUpTrend   = upTrend and not upTrend[1] and rsi > rsiMid //trend flipped to uptrend with RSI being bullish
+newDownTrend = downTrend and not downTrend[1] and rsi < rsiMid //trend flipped to downtrend with RSI being bearish
+
+// Type 4: RSI momentum shift in trend
+rsiMomentumLong  = upTrend and rsiRising and rsi[1] < rsiMid and rsi > rsiMid //uptrend with rising RSI with a cross from below midpoint to above midpoint -> bullish shift
+rsiMomentumShort = downTrend and rsiFalling and rsi[1] > rsiMid and rsi < rsiMid //downtrend with falling RSI with a cross from above midpoint to below -> bearish shift
+
+// Combine based on selected mode
+longSignal = switch entryMode
+    "RSI Crossover Only" => upTrend and longCross
+    "RSI Zone + MA"      => upTrend and (longCross or pricePullbackLong)
+    "Multiple Signals"   => upTrend and (longCross or pricePullbackLong or newUpTrend or rsiMomentumLong)
+    => false
+
+shortSignal = switch entryMode
+    "RSI Crossover Only" => downTrend and shortCross
+    "RSI Zone + MA"      => downTrend and (shortCross or pricePullbackShort)
+    "Multiple Signals"   => downTrend and (shortCross or pricePullbackShort or newDownTrend or rsiMomentumShort)
+    => false
+
+// POSITION TRACKING //
+var int position = 0  // 0 = flat, 1 = long, -1 = short
+//flat means no position as it indicates a consolidation period. Good for iron condors via options
+
+// Exit conditions - calculate crossovers first for consistency
+rsiCrossUnderOB = ta.crossunder(rsi, rsiOB)
+rsiCrossOverOS = ta.crossover(rsi, rsiOS)
+
+// Check for exit signals
+longExitSignal  = position == 1 and (rsiCrossUnderOB or downTrend)//RSI crosses down through overbought level.
+shortExitSignal = position == -1 and (rsiCrossOverOS or upTrend)//RSI crosses up through oversold level.
+
+// Check for entry signals after considering exits
+longEntrySignal  = longSignal and position <= 0  //Enter if flat or in short
+shortEntrySignal = shortSignal and position >= 0  //Enter if flat or in long
+
+// Exits take priority as we must first exit a position to enter a new one 
+bool longEntry = false
+bool shortEntry = false
+bool longExit = false
+bool shortExit = false
+
+// Handle position changes with exit priority
+if longExitSignal
+    longExit := true
+    position := 0
+else if shortExitSignal
+    shortExit := true
+    position := 0
+else if longEntrySignal and position != 1
+    longEntry := true
+    position := 1
+else if shortEntrySignal and position != -1
+    shortEntry := true
+    position := -1
+//Exit first then look to enter a new long/short position
+
+// PLOTS //
+// MAs on chart
+plot(fastMA, title="Fast MA", color=color.new(color.green, 0), linewidth=2)
+plot(slowMA, title="Slow MA", color=color.new(color.blue, 0), linewidth=2)
+
+// Trend shading
+// bgcolor(upTrend ? color.new(color.lime, 90) : na, title="Uptrend Background") //optional if you want to see trend as a background
+// bgcolor(downTrend ? color.new(color.red, 90) : na, title="Downtrend Background")
+
+// RSI ON CHART //
+// Plot RSI as overlay on price chart
+// You can also add RSI as a separate indicator if preferred
+// plot(rsi, title="RSI", color=color.new(color.blue, 0), linewidth=1)
+// hline(rsiOB, "RSI Overbought", color=color.new(color.red, 50))
+// hline(rsiOS, "RSI Oversold",   color=color.new(color.lime, 50))
+// hline(rsiMid, "RSI Midpoint",  color=color.new(color.gray, 70), linestyle=hline.style_dotted)
+
+// SIGNAL MARKERS //
+plotshape(longEntry,  title="Long Entry",  location=location.belowbar,
+     style=shape.triangleup,   size=size.small, color=color.new(color.lime, 0), text="LONG")
+plotshape(longExit,   title="Long Exit",   location=location.abovebar,
+     style=shape.xcross,       size=size.small, color=color.new(color.orange, 0), text="EXIT")
+plotshape(shortEntry, title="Short Entry", location=location.abovebar,
+     style=shape.triangledown, size=size.small, color=color.new(color.red, 0), text="SHORT")
+plotshape(shortExit,  title="Short Exit",  location=location.belowbar,
+     style=shape.xcross,       size=size.small, color=color.new(color.orange, 0), text="EXIT")
+
+// LABELS //
+// Show current position status
+var label posLabel = na
+label.delete(posLabel)
+posText = position == 1 ? "LONG" : position == -1 ? "SHORT" : "FLAT"
+posColor = position == 1 ? color.lime : position == -1 ? color.red : color.gray
+posLabel := label.new(bar_index, high, posText, 
+     color=color.new(posColor, 70), 
+     textcolor=color.white, 
+     style=label.style_label_down,
+     size=size.small)
+
+//ALERTS //
+alertcondition(longEntry,  title="Long Entry",  
+     message="LONG ENTRY")
+alertcondition(longExit,   title="Long Exit",           
+     message="LONG EXIT")
+alertcondition(shortEntry, title="Short Entry", 
+     message="SHORT ENTRY")
+alertcondition(shortExit,  title="Short Exit",          
+     message="SHORT EXIT")
